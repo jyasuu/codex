@@ -48,9 +48,9 @@ See the accompanying architecture diagram from design discussion for the full pi
 
 - **Language/runtime:** Rust, Tokio
 - **Storage:** Postgres (JSONB payload + partitioning by entity type), object storage for large attachments (replacing NAS)
-- **Search:** Elasticsearch per entity type (or `pg_trgm` for simpler entity types, decided per registry entry)
+- **Search:** Elasticsearch per entity type (material is on Elasticsearch; `pg_trgm` remains available per registry entry for lower-volume entity types — ADR-0002)
 - **Rate limiting:** Redis
-- **Messaging:** queue-based replication and outbound delivery (broker TBD), consumers autoscaled via KEDA
+- **Messaging:** RabbitMQ for both the internal committed/state-changed event bus and per-subscriber outbound delivery queues (ADR-0008), written via a transactional outbox (ADR-0009); consumers autoscaled via KEDA on queue depth
 - **AI integration:** MCP server exposing tools generated dynamically from the registry
 - **API surface:** gRPC (internal/service-to-service) + REST gateway (broad downstream compatibility)
 

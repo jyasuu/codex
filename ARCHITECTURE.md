@@ -63,11 +63,11 @@ Per-entity-type index management:
 
 ### 2.6 Distribution Service
 
-Generic fan-out:
-- Consumes "committed" and "state changed" events into a staging table (`distribution_record`)
+Generic fan-out, incremental only — every dispatch corresponds to one changed record, never a full-dataset resync (see §6, "Outbound scalability"):
+- Consumes "committed" and "state changed" events (delivered via the transactional outbox relay, ADR-0009) into a staging table (`distribution_record`)
 - Priority-queue dispatcher, evaluated in code against the entity type's distribution profile (priority is business logic, not broker config — see prior discussion)
-- Delivery paths: push (webhook/queue per subscriber) and pull (subscriber-initiated fetch, for legacy downstream systems that can't accept pushes)
-- Retry + dead-letter handling per subscriber
+- Delivery paths: push (RabbitMQ queue per subscriber, ADR-0008) and pull (subscriber-initiated fetch of individual missed records, for legacy downstream systems that can't accept pushes, or for a subscriber catching up after downtime)
+- Retry + dead-letter handling per subscriber, backed by RabbitMQ's native dead-letter exchange support (ADR-0008)
 
 ## 3. Data flow (write path)
 
@@ -116,14 +116,14 @@ These applied to material specifically; as generic requirements they now apply p
 
 - **Search:** full-text + structural search at scale (material: 26M rows / 13GB) without dominating disk IO/CPU — decision on ES vs `pg_trgm` is per entity type (ADR-0002).
 - **Rate limiting:** top-bound and low-bound throttling per consumer identity, particularly for SAP-style high-volume consumers — Redis-backed, generic across entity types.
-- **Outbound scalability:** fan-out to N subscribers without a broadcast-storm — confirm actual sync cadence (full vs incremental) before assuming broadcast is safe at any entity type's subscriber count. The original bandwidth estimate for material (20,000 records × 2KB × 246 systems) works out to roughly 9.8 GB per full broadcast — at 30 Mb/s intranet bandwidth that's tens of minutes, which rules out full broadcast on every write and pushes the design toward incremental delivery per subscriber.
+- **Outbound scalability:** fan-out to N subscribers without a broadcast-storm. The original bandwidth estimate for material (20,000 records × 2KB × 246 systems) works out to roughly 9.8 GB per full broadcast — at 30 Mb/s intranet bandwidth that's tens of minutes, which rules out full broadcast on every write. Distribution Service supports incremental delivery only — one event, one changed record, per write — with no full-sync/full-broadcast delivery path in the design. A subscriber that needs to catch up from a gap (e.g. after extended downtime) does so via the pull delivery path (ARCHITECTURE.md §2.6) fetching individual missed records, not via a platform-triggered full resync of its entire dataset.
 - **Autoscaling:** consumer pods (replication, outbound) scale with queue depth via KEDA, not fixed replica counts.
 - **Consistency:** each entity type's registry entry declares its consistency SLA (how long a downstream system may lag behind a committed write) so the rate limiter and outbound queue can be tuned without silently violating it.
 
 ## 7. Deployment topology (proposed)
 
 - Registry, Gateway, Data Service, Workflow Service, Search Service, Distribution Service each deploy independently (separate binaries/containers), communicating over gRPC internally.
-- Postgres (primary store), Redis (rate limiting + cache invalidation pub/sub), message broker (event bus for committed/state-changed events), Elasticsearch (optional, per entity type) as stateful dependencies.
+- Postgres (primary store), Redis (rate limiting + cache invalidation pub/sub), RabbitMQ (event bus for committed/state-changed events and per-subscriber outbound delivery — ADR-0008), Elasticsearch (per entity type, per ADR-0002 — material is on Elasticsearch) as stateful dependencies.
 - KEDA-managed autoscaling on Search sync consumers and Distribution outbound consumers, since those are the queue-depth-driven components.
 
 ## 8. What's deliberately not generic (yet)
@@ -133,19 +133,21 @@ These applied to material specifically; as generic requirements they now apply p
 
 ## 9. Design status
 
-The core architectural decision set is closed as of ADR-0007. Together, ADR-0001 through ADR-0007 answer, in order: how an entity is represented, where it's stored, what its envelope looks like, how it enters the system, how it propagates as events, and how external systems consume it — each ADR's decision depends on and is consistent with the ones before it.
+The core architectural decision set is closed as of ADR-0009. ADR-0001 through ADR-0007 answer, in order: how an entity is represented, where it's stored, what its envelope looks like, how it enters the system, how it propagates as events, and how external systems consume it. ADR-0008 and ADR-0009 close the two implementation-risk gaps that sequence surfaced but didn't resolve: which broker, and how promotion's Postgres-write-plus-event-emission stays consistent.
 
 | ADR | Decision |
 |---|---|
 | 0001 | Schema-as-data over codegen |
-| 0002 | Search backend chosen per entity type |
+| 0002 | Search backend chosen per entity type (material: Elasticsearch) |
 | 0003 | Single generic table, JSON upsert over per-entity-type tables |
 | 0004 | Entity envelope — platform metadata vs. business payload |
 | 0005 | Draft-first workflow persistence |
 | 0006 | Event contract versioning |
 | 0007 | Subscriber Registry ownership, separate from Entity Registry |
+| 0008 | Message broker — RabbitMQ |
+| 0009 | Transactional outbox for promotion event emission |
 
-From here, the remaining risk is implementation complexity, not architectural direction — particularly the promotion transaction (ADR-0005), dual-version event emission (ADR-0006), and the real cost of migrating material's 246 existing subscribers onto the Subscriber Registry (ADR-0007).
+From here, the remaining risk is implementation execution, not open architectural direction — particularly the outbox relay's operational behavior under load (ADR-0009), dual-version event emission (ADR-0006), and the real cost of migrating material's 246 existing subscribers onto the Subscriber Registry (ADR-0007).
 
 ## 10. Deferred — phase 2 concerns
 

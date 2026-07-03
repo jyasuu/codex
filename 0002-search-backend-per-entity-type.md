@@ -2,7 +2,7 @@
 
 ## Status
 
-Deferred (for material specifically) / Accepted (as a platform mechanism)
+Accepted — including material's specific backend choice (Elasticsearch), resolved below.
 
 ## Context
 
@@ -12,7 +12,7 @@ Material's search requirement — 26M rows, 13GB, full-text plus complex structu
 
 The registry's `index.backend` field (see `registry-schema-spec.md`, section 4) makes search backend a per-entity-type choice, not a platform-wide one. Search Service supports both `elasticsearch` and `pg_trgm` and routes per entity type accordingly.
 
-The specific choice for material itself is deferred until both are prototyped against real material query logs (see "Revisit when").
+Material's own `index.backend` is set to `elasticsearch`. Material's requirement — full-text plus complex structural search at 26M rows / 13GB, with an existing production query pattern the legacy system already serves on Elasticsearch — is exactly the case ADR-0002's "Alternatives considered" section flags as the risk of committing to `pg_trgm` platform-wide: untested against material's actual query complexity at this volume. Rather than spend a prototyping cycle validating `pg_trgm` against a workload Elasticsearch is already known to serve correctly in production today, material stays on Elasticsearch and the mechanism (both backends supported, chosen per entity type) remains available for a future entity type whose volume or query shape doesn't justify a second data store.
 
 ## Alternatives considered
 
@@ -27,4 +27,4 @@ The specific choice for material itself is deferred until both are prototyped ag
 
 ## Revisit when
 
-Material's specific backend choice is unresolved — prototype both `elasticsearch` and `pg_trgm` (with GIN indexing) against real material query logs before Milestone 4 locks in material's registry entry. Whichever wins becomes the reference example other entity types compare against when choosing their own `index.backend`.
+A future entity type's volume and query pattern don't justify Elasticsearch's operational cost (a second data store, a sync pipeline) — that's the case to prototype `pg_trgm` against, using material's Elasticsearch entry as the reference point for what a "needs ES" workload looks like versus one that doesn't.

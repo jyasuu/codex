@@ -13,8 +13,10 @@ Feature checklist for Codex, organized by milestone. Within each milestone, task
 - [x] ADR-0005: Draft-first workflow persistence
 - [x] ADR-0006: Event contract versioning
 - [x] ADR-0007: Subscriber Registry ownership
+- [x] ADR-0008: Message broker — RabbitMQ
+- [x] ADR-0009: Transactional outbox for promotion event emission
 
-Core architectural direction is settled as of ADR-0007. See `ARCHITECTURE.md` §10 for the phase-2 concerns deliberately deferred out of this sequence (registry domain separation, event registry model, authorization, cross-entity references, rollback, observability, multi-region) — pick these up opportunistically as their triggers hit, not as a blocking prerequisite to starting Milestone 0.
+Core architectural direction, including both implementation-risk gaps ADR-0007 left open (broker choice, promotion dual-write), is settled as of ADR-0009. See `ARCHITECTURE.md` §10 for the phase-2 concerns deliberately deferred out of this sequence (registry domain separation, event registry model, authorization, cross-entity references, rollback, observability, multi-region) — pick these up opportunistically as their triggers hit, not as a blocking prerequisite to starting Milestone 0.
 
 ---
 
@@ -25,8 +27,8 @@ Core architectural direction is settled as of ADR-0007. See `ARCHITECTURE.md` §
 - [ ] Shared entity envelope type in `common` (id, entity_type, version, status, payload, created_at, updated_at)
 - [ ] Structured logging/tracing setup shared across crates
 - [ ] CI pipeline: build, clippy, test on push (reuse pattern from existing release workflow experience)
-- [ ] Local dev environment (docker-compose: Postgres, Redis, message broker, optional Elasticsearch)
-- [ ] Decide and pin: message broker choice (Kafka vs RabbitMQ vs NATS)
+- [ ] Local dev environment (docker-compose: Postgres, Redis, RabbitMQ, Elasticsearch)
+- [ ] `outbox_events` table + outbox relay skeleton in `common`/`data-service` (ADR-0009), adapting AnvilNotify's outbox worker (adaptive poll backoff, stale lock reaper)
 
 ---
 
@@ -68,7 +70,7 @@ Core architectural direction is settled as of ADR-0007. See `ARCHITECTURE.md` §
 - [ ] State machine engine (generic — states/transitions loaded from registry per entity_type)
 - [ ] Approval action API operating on drafts (submit, approve, reject, request changes)
 - [ ] Role/permission check per transition (who can approve what, from registry config)
-- [ ] Promotion transaction: base_version staleness check → final schema validation → upsert into `entities` (set `source_draft_id`, increment `version`) → remove/archive draft → emit `EntityCommitted` — must be atomic
+- [ ] Promotion transaction: base_version staleness check → final schema validation → upsert into `entities` (set `source_draft_id`, increment `version`) → remove/archive draft → write `EntityCommitted` outbox row, all in one Postgres transaction (ADR-0009); outbox relay publishes to RabbitMQ (ADR-0008) after commit
 - [ ] Single-open-draft-per-target-entity enforcement (concurrent draft conflict rule, ADR-0005)
 - [ ] Change request types generalized (replaces material's A/C/E/U/L/R enum) — per entity type, configurable
 - [ ] Post-promotion transitions (e.g. approved → archived) operate directly on `entities.workflow_state`, no further draft cycle
@@ -83,8 +85,7 @@ Core architectural direction is settled as of ADR-0007. See `ARCHITECTURE.md` §
 ## Milestone 4 — Search & Distribution generalization
 
 ### Search
-- [ ] Per-entity-type Elasticsearch index template generation from registry config
-- [ ] Fallback path: `pg_trgm` for entity types that don't need full ES (decision made per entity type in registry)
+- [ ] Elasticsearch index template generation from registry config (material: Elasticsearch per ADR-0002; `pg_trgm` path stays implemented in Search Service for future lower-volume entity types, but material does not use it)
 - [ ] Index sync pipeline (data service write → index update), async
 - [ ] Vectorization/embedding pipeline (optional per entity type flag)
 - [ ] Semantic retrieval query path (opt-in per entity type)
@@ -95,16 +96,15 @@ Core architectural direction is settled as of ADR-0007. See `ARCHITECTURE.md` §
 - [ ] Subscriber Registry (separate domain per ADR-0007): subscriber_id, display_name, owner_contact, status
 - [ ] Subscription records: subscriber_id × entity_type, priority_tier, delivery_method, event_versions map, rate_limit_override, retry_policy, status
 - [ ] Generic staging table (`distribution_record`: entity_type, payload, target subscriber, status)
-- [ ] Replication queue (Data Service `EntityCommitted` event → staging table)
+- [ ] Replication queue (RabbitMQ, fed by the outbox relay's `EntityCommitted` publish, ADR-0008/0009 → staging table)
 - [ ] Outbound priority queue dispatcher (business priority rules evaluated in code, not in broker; reads entity type's tier SLA + subscriber's subscription)
 - [ ] Dual-version event emission per subscriber's `event_versions` map (ADR-0006) — dispatcher transforms committed entity into the shape each subscriber's declared version expects
-- [ ] Push delivery path (webhook / queue per subscriber)
-- [ ] Pull delivery path (subscriber-initiated fetch, for legacy downstream systems)
+- [ ] Push delivery path (RabbitMQ queue per subscriber, ADR-0008)
+- [ ] Pull delivery path (subscriber-initiated fetch of individual missed records — for legacy downstream systems, or a subscriber catching up after downtime; no platform-triggered full resync, see §6)
 - [ ] Rate limit / throttling per subscriber (top-bound / low-bound), backed by Redis, subscriber override support
-- [ ] Retry + dead-letter handling for failed deliveries
+- [ ] Retry + dead-letter handling for failed deliveries via RabbitMQ dead-letter exchanges (ADR-0008)
 - [ ] Migrate material's 246 downstream subscribers into Subscriber Registry + subscriptions
-- [ ] Bandwidth/traffic model validation for full-sync vs incremental delivery (confirm real cadence requirement)
-- [ ] KEDA autoscaling config for replication/outbound consumer pods (cross-team: k8s admin support)
+- [ ] KEDA autoscaling config for replication/outbound consumer pods on RabbitMQ queue depth (cross-team: k8s admin support)
 - [ ] Event version retirement process (governance, per ADR-0006) — track which subscriber is on which version, confirm migration before retiring an old version
 
 ---
